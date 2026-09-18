@@ -8,8 +8,9 @@ at [CluvexStudio/Aether](https://github.com/CluvexStudio/Aether).
 ## Setup
 
 Follow **Building from source** in the [README](README.md) — you'll need Node.js, the Rust stable
-toolchain, and Tauri's platform prerequisites, then `npm install` and the Aether binary fetched
-into `src-tauri/binaries/`. Run the app with `npm run tauri dev`.
+toolchain, and Tauri's platform prerequisites, then `npm ci` and `npm run fetch:core`.
+The verified executable and support files go into `src-tauri/binaries/core/`.
+Run the app with `npm run tauri dev`.
 
 ## Before you open a PR
 
@@ -20,7 +21,8 @@ into `src-tauri/binaries/`. Run the app with `npm run tauri dev`.
   npm run typecheck
   npm run lint
   npm run build
-  cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings
+  npm test
+  cd src-tauri && cargo fmt --check && cargo test --locked && cargo clippy --all-targets -- -D warnings
   ```
 
 - Match the surrounding code style; the existing code leans on clear names and comments that explain

@@ -8,9 +8,11 @@ import { useConnectionStore } from "@/state/connectionStore"
  * user to retry without relaunching the tunnel. */
 export function AccessCodePrompt() {
   const logs = useConnectionStore((s) => s.logs)
+  const status = useConnectionStore((s) => s.status)
   const [code, setCode] = useState("")
   const [submittedFor, setSubmittedFor] = useState(0)
   const [sending, setSending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const promptCount = useMemo(
     () =>
       logs.filter((log) => log.line === "[gui] Zero Trust access code required")
@@ -19,23 +21,26 @@ export function AccessCodePrompt() {
   )
   const waiting = promptCount > submittedFor
 
-  if (!waiting) return null
+  if (!waiting || (status.state !== "Launching" && status.state !== "Connecting")) return null
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!code.trim() || sending) return
     setSending(true)
+    setError(null)
     try {
       await invoke("submit_access_code", { code })
       setCode("")
       setSubmittedFor(promptCount)
+    } catch (e) {
+      setError(String(e))
     } finally {
       setSending(false)
     }
   }
 
   return (
-    <form onSubmit={submit} className="flex w-full max-w-xs items-center gap-2">
+    <form onSubmit={submit} className="flex w-full max-w-xs flex-wrap items-center gap-2">
       <input
         autoFocus
         type="text"
@@ -50,6 +55,7 @@ export function AccessCodePrompt() {
       <Button type="submit" size="sm" disabled={!code.trim() || sending}>
         {sending ? "Sending…" : "Verify"}
       </Button>
+      {error && <p role="alert" className="w-full text-xs text-destructive">{error}</p>}
     </form>
   )
 }

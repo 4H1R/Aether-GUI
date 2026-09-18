@@ -28,6 +28,12 @@ pub struct AetherManager {
     generation: u64,
 }
 
+impl Default for AetherManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AetherManager {
     pub fn new() -> Self {
         Self {
@@ -214,6 +220,7 @@ fn spawn_and_monitor(
 /// worst on gool since it's two nested tunnels, but not exclusive to it)
 /// into a brief, visible "Reconnecting" instead of dumping the user back to
 /// Idle every time.
+#[allow(clippy::too_many_arguments)] // Keeps the attempt generation with its retry inputs.
 fn handle_unexpected_failure(
     app: AppHandle,
     manager: Arc<Mutex<AetherManager>>,

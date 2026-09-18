@@ -81,8 +81,11 @@ export function ConnectionStatusLine() {
   /* eslint-disable react-hooks/set-state-in-effect -- capturing Date.now()
    * at the moment of transition; can't be computed during render. */
   useEffect(() => {
-    if (status.state === "Launching") setAttemptStartedAt(Date.now());
-    else if (status.state === "Idle") setAttemptStartedAt(null);
+    if (status.state === "Launching" || status.state === "Connecting") {
+      setAttemptStartedAt((started) => started ?? Date.now());
+    } else {
+      setAttemptStartedAt(null);
+    }
   }, [status.state]);
   /* eslint-enable react-hooks/set-state-in-effect */
   const isAttempting = status.state === "Launching" || status.state === "Connecting";

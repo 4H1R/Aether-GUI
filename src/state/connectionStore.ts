@@ -223,11 +223,14 @@ export async function initConnectionListeners(): Promise<() => void> {
 
   const [unlistenStatus, unlistenLog] = await Promise.all([
     listen<ConnectionStatus>("aether://status", (e) => {
-      useConnectionStore.setState({
+      useConnectionStore.setState((s) => ({
         status: e.payload,
         // Fresh attempt — last attempt's budget no longer applies.
-        ...(e.payload.state === "Launching" ? { scanBudgetSecs: null } : {}),
-      });
+        ...(e.payload.state === "Launching" ||
+        (e.payload.state === "Connecting" && s.status.state === "Reconnecting")
+          ? { scanBudgetSecs: null }
+          : {}),
+      }));
     }),
     listen<LogLine>("aether://log", (e) => {
       pendingLogs.push(e.payload);
