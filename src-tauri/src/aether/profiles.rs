@@ -119,9 +119,7 @@ pub struct ConnectionProfile {
     pub quick_reconnect: bool,
     /// Aether ≥1.2.0: run the MASQUE tunnel over HTTP/2 (TCP) instead of the
     /// default HTTP/3 (QUIC) — for networks that block or throttle UDP.
-    /// Passed as the AETHER_MASQUE_HTTP2 env var, not a flag: there is no
-    /// `--h3` flag, and setting the env to any value also suppresses 1.2.0's
-    /// new interactive "MASQUE transport" prompt in both directions.
+    /// Aether 2.0 accepts explicit --h2 and --h3 flags, suppressing prompts.
     #[serde(default)]
     pub masque_http2: bool,
     /// Fragment the TLS ClientHello on the HTTP/2 carrier.
@@ -291,25 +289,81 @@ impl ConnectionProfile {
     }
 
     pub fn is_masque(&self) -> bool {
-        matches!(self.protocol, Protocol::Auto | Protocol::Masque | Protocol::Mim)
+        matches!(
+            self.protocol,
+            Protocol::Auto | Protocol::Masque | Protocol::Mim
+        )
     }
 
     /// Reject bad settings before provisioning an identity or spawning a core.
     pub fn validate(&self) -> Result<(), String> {
-        let socks = self.bind_address.trim().parse::<std::net::SocketAddr>()
+        let socks = self
+            .bind_address
+            .trim()
+            .parse::<std::net::SocketAddr>()
             .map_err(|_| "SOCKS5 address must be an IP address and port".to_string())?;
-        if socks.port() == 0 { return Err("SOCKS5 port must be between 1 and 65535".into()); }
+        if socks.port() == 0 {
+            return Err("SOCKS5 port must be between 1 and 65535".into());
+        }
         if !self.http_proxy.trim().is_empty() {
-            let http = self.http_proxy.trim().parse::<std::net::SocketAddr>()
+            let http = self
+                .http_proxy
+                .trim()
+                .parse::<std::net::SocketAddr>()
                 .map_err(|_| "HTTP proxy address must be an IP address and port".to_string())?;
-            if http.port() == 0 { return Err("HTTP proxy port must be between 1 and 65535".into()); }
+            if http.port() == 0 {
+                return Err("HTTP proxy port must be between 1 and 65535".into());
+            }
             if http.port() == socks.port() {
                 return Err("HTTP and SOCKS5 proxies must use different ports".into());
             }
         }
         let upstream = self.upstream_proxy.trim();
-        if !upstream.is_empty() && !(upstream.starts_with("socks5://") || upstream.starts_with("http://")) {
+        if !upstream.is_empty()
+            && !(upstream.starts_with("socks5://") || upstream.starts_with("http://"))
+        {
             return Err("Upstream proxy must start with socks5:// or http://".into());
+        }
+        if !upstream.is_empty() {
+            let invalid = || {
+                "Upstream proxy must include a valid host and port, with no path or query"
+                    .to_string()
+            };
+            let url = tauri::Url::parse(upstream).map_err(|_| invalid())?;
+            let endpoint = upstream
+                .rsplit('@')
+                .next()
+                .unwrap_or(upstream)
+                .trim_end_matches('/');
+            let port = endpoint
+                .rsplit(':')
+                .next()
+                .and_then(|s| s.parse::<u16>().ok());
+            if url.host_str().is_none()
+                || port.is_none()
+                || port == Some(0)
+                || !matches!(url.path(), "" | "/")
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || upstream.chars().any(char::is_whitespace)
+            {
+                return Err(invalid());
+            }
+        }
+        if !self.zero_trust_team.trim().is_empty() {
+            let complete = match self.zero_trust_auth {
+                ZeroTrustAuth::Email => !self.access_email.trim().is_empty(),
+                ZeroTrustAuth::Service => {
+                    !self.access_client_id.trim().is_empty()
+                        && !self.access_client_secret.trim().is_empty()
+                }
+                ZeroTrustAuth::Token => !self.access_token.trim().is_empty(),
+            };
+            if !complete {
+                return Err(
+                    "Enter the credentials for your selected Zero Trust sign-in method".into(),
+                );
+            }
         }
         Ok(())
     }
@@ -471,7 +525,12 @@ mod tests {
 
     #[test]
     fn nested_masque_uses_masque_obfuscation_and_h2_fragmentation() {
-        let p = ConnectionProfile { protocol: Protocol::Mim, masque_http2: true, tls_fragment: true, ..Default::default() };
+        let p = ConnectionProfile {
+            protocol: Protocol::Mim,
+            masque_http2: true,
+            tls_fragment: true,
+            ..Default::default()
+        };
         let args = p.as_args();
         assert_eq!(&args[..3], ["--mim", "--h2", "--fragment"]);
         assert!(args.windows(2).any(|a| a == ["--noize", "firewall"]));
@@ -479,17 +538,54 @@ mod tests {
 
     #[test]
     fn wireguard_does_not_receive_masque_flags() {
-        let p = ConnectionProfile { protocol: Protocol::Wireguard, masque_http2: true, tls_fragment: true, ..Default::default() };
+        let p = ConnectionProfile {
+            protocol: Protocol::Wireguard,
+            masque_http2: true,
+            tls_fragment: true,
+            ..Default::default()
+        };
         assert!(!p.as_args().iter().any(|a| a == "--h2" || a == "--fragment"));
     }
 
     #[test]
     fn proxy_conflicts_are_rejected_and_upstream_credentials_are_not_arguments() {
-        let mut p = ConnectionProfile { http_proxy: "127.0.0.1:1819".into(), upstream_proxy: "http://user:secret@localhost:1080".into(), ..Default::default() };
+        let mut p = ConnectionProfile {
+            http_proxy: "127.0.0.1:1819".into(),
+            upstream_proxy: "http://user:secret@localhost:1080".into(),
+            ..Default::default()
+        };
         assert!(p.validate().is_err());
         p.http_proxy = "127.0.0.1:1820".into();
         assert!(p.validate().is_ok());
         assert!(!p.as_args().iter().any(|a| a.contains("secret")));
+    }
+
+    #[test]
+    fn malformed_upstream_cannot_silently_fall_back_to_direct_traffic() {
+        for value in [
+            "http://",
+            "socks5://localhost",
+            "http://localhost:0",
+            "http://localhost:80/path",
+            "http://localhost:80?token=x",
+        ] {
+            let p = ConnectionProfile {
+                upstream_proxy: value.into(),
+                ..Default::default()
+            };
+            assert!(p.validate().is_err(), "accepted {value}");
+        }
+        for value in [
+            "http://localhost:80",
+            "socks5://[::1]:1080",
+            "http://user:pass@localhost:8080/",
+        ] {
+            let p = ConnectionProfile {
+                upstream_proxy: value.into(),
+                ..Default::default()
+            };
+            assert!(p.validate().is_ok(), "rejected {value}");
+        }
     }
 }
 

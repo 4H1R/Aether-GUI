@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 pub struct PtySession {
     child: Box<dyn Child + Send + Sync>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    redactions: Arc<Mutex<Vec<String>>>,
     // Keeps the pty master (and thus the slave/child's controlling tty) alive
     // for the life of the session; never read from directly after spawn.
     _master: Box<dyn MasterPty + Send>,
@@ -49,6 +50,7 @@ impl PtySession {
             .writer
             .lock()
             .map_err(|_| AetherError::Internal("Aether input is unavailable".into()))?;
+        self.redactions.lock().unwrap().push(code.to_string());
         writer
             .write_all(code.as_bytes())
             .and_then(|_| writer.write_all(b"\r\n"))
@@ -58,6 +60,7 @@ impl PtySession {
 
     pub fn kill(&mut self) {
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -92,7 +95,11 @@ pub fn spawn(
     // The GUI owns its launch settings. Inherited CLI settings can otherwise
     // move the listener, force Tor, or silently reuse a different team's token.
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().to_ascii_uppercase().starts_with("AETHER_") {
+        if key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("AETHER_")
+        {
             cmd.env_remove(key);
         }
     }
@@ -149,6 +156,14 @@ pub fn spawn(
         .map_err(|e| AetherError::SpawnFailed(e.to_string()))?;
     let writer = Arc::new(Mutex::new(raw_writer));
     let writer_for_thread = Arc::clone(&writer);
+    let redactions = Arc::new(Mutex::new(vec![
+        profile.access_email.clone(),
+        profile.access_client_id.clone(),
+        profile.access_client_secret.clone(),
+        profile.access_token.clone(),
+        profile.upstream_proxy.clone(),
+    ]));
+    let redactions_for_thread = Arc::clone(&redactions);
 
     std::thread::spawn(move || {
         read_loop(
@@ -156,12 +171,14 @@ pub fn spawn(
             writer_for_thread,
             profile,
             log_tx,
+            redactions_for_thread,
         );
     });
 
     Ok(PtySession {
         child,
         writer,
+        redactions,
         _master: pair.master,
     })
 }
@@ -171,6 +188,7 @@ fn read_loop(
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     profile: ConnectionProfile,
     log_tx: Sender<LogEvent>,
+    redactions: Arc<Mutex<Vec<String>>>,
 ) {
     let mut answered: HashSet<&'static str> = HashSet::new();
     let mut current_section: Option<&'static str> = None;
@@ -204,7 +222,7 @@ fn read_loop(
                 }
             }
             let _ = log_tx.send(LogEvent {
-                line,
+                line: redact(&line, &redactions.lock().unwrap()),
                 timestamp: now_millis(),
             });
         }
@@ -250,6 +268,14 @@ fn read_loop(
             }
         }
     }
+}
+
+fn redact(line: &str, secrets: &[String]) -> String {
+    let mut output = line.to_string();
+    for secret in secrets.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        output = output.replace(secret, "[redacted]");
+    }
+    output
 }
 
 /// Longest the unterminated tail may grow before the front is discarded.
@@ -308,7 +334,7 @@ fn strip_ansi(s: &str) -> String {
         if c == '\u{1b}' && chars.peek() == Some(&'[') {
             chars.next();
             for c2 in chars.by_ref() {
-                if c2.is_ascii_alphabetic() {
+                if ('@'..='~').contains(&c2) {
                     break;
                 }
             }
@@ -322,6 +348,86 @@ fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn real_pty_launch_passes_flags_isolates_environment_and_redacts_logs() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        let dir = std::env::temp_dir().join(format!(
+            "aether-gui-pty-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(if cfg!(windows) {
+            "fixture.exe"
+        } else {
+            "fixture"
+        });
+        let output = std::process::Command::new("rustc")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core.rs"))
+            .args(["--edition", "2021", "-o"])
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let profile = ConnectionProfile {
+            zero_trust_team: "fixture".into(),
+            zero_trust_auth: ZeroTrustAuth::Token,
+            access_token: "fixture-token".into(),
+            ..Default::default()
+        };
+        std::env::set_var("AETHER_UNEXPECTED_SETTING", "must-not-reach-child");
+        let result = spawn(&binary, &dir, profile, tx);
+        std::env::remove_var("AETHER_UNEXPECTED_SETTING");
+        let mut session = result.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut ready = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(log) => {
+                    assert!(!log.line.contains("fixture-token"));
+                    if log.line.contains("fixture ready: [redacted]") {
+                        ready = true;
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(_) => {}
+            }
+        }
+        session.kill();
+        drop(session);
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(
+            ready,
+            "PTY child did not receive the expected flags/environment or its output was lost"
+        );
+    }
+
+    #[test]
+    fn credentials_and_echoed_access_codes_are_redacted() {
+        assert_eq!(
+            redact("Enter the code: 123456", &["123456".into()]),
+            "Enter the code: [redacted]"
+        );
+        assert_eq!(
+            redact("token=private", &["".into(), "private".into()]),
+            "token=[redacted]"
+        );
+    }
+
+    #[test]
+    fn ansi_non_alphabetic_final_bytes_do_not_swallow_log_text() {
+        assert_eq!(strip_ansi("\u{1b}[1~Hello"), "Hello");
+    }
 
     fn feed(buf: &mut String, chunk: &str) -> Vec<String> {
         buf.push_str(chunk);
