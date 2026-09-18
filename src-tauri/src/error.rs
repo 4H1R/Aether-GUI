@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum AetherError {
     #[error("Aether is already running")]
     AlreadyRunning,
+    #[error("invalid connection settings: {0}")]
+    InvalidProfile(String),
     #[error("Aether binary not found at {0}")]
     BinaryMissing(String),
     #[error("failed to launch Aether: {0}")]

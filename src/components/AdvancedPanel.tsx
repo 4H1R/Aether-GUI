@@ -15,6 +15,7 @@ import { NoizeProfileToggle } from "@/components/NoizeProfileToggle";
 import { BindAddressField } from "@/components/BindAddressField";
 import { ZeroTrustSettings } from "@/components/ZeroTrustSettings";
 import { RoutingSettings } from "@/components/RoutingSettings";
+import { TransportSettings } from "@/components/TransportSettings";
 import { useConnectionStore } from "@/state/connectionStore";
 
 function FieldRow({
@@ -88,7 +89,7 @@ export function AdvancedPanel() {
           <div className="flex flex-col gap-4 pb-2">
             <FieldRow
               label="Protocol"
-              tooltip="MASQUE disguises traffic as normal HTTPS — best against strict censorship. WireGuard is lighter and faster. gool nests two WireGuard tunnels for extra security at a speed cost."
+              tooltip="MASQUE disguises traffic as HTTPS. WireGuard is lighter. gool nests two WireGuard tunnels; MASQUE-in-MASQUE nests two MASQUE tunnels to obtain a different exit address."
             >
               <ProtocolSelect />
             </FieldRow>
@@ -106,6 +107,12 @@ export function AdvancedPanel() {
               tooltip="How the MASQUE tunnel carries traffic. HTTP/3 (QUIC) has the fastest handshake; HTTP/2 (TCP) looks like ordinary HTTPS and works where UDP is blocked or throttled. Only applies to the MASQUE protocol."
             >
               <MasqueTransportToggle />
+            </FieldRow>
+            <FieldRow
+              label="Transport & additional proxies"
+              tooltip="HTTP/2 handshake fragmentation, a local HTTP CONNECT proxy, and an upstream proxy for dialing out."
+            >
+              <TransportSettings />
             </FieldRow>
             <FieldRow
               label="Obfuscation"
@@ -127,7 +134,7 @@ export function AdvancedPanel() {
             </FieldRow>
             <FieldRow
               label="DNS & Routing"
-              tooltip="Optional Aether 1.5 controls for DNS inside the tunnel and rules that block a destination or send it directly outside the tunnel."
+              tooltip="DNS inside the tunnel and rules that block a destination or send it directly outside the tunnel."
             >
               <RoutingSettings />
             </FieldRow>

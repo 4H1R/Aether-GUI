@@ -1,14 +1,16 @@
 {
   "name": "aether-gui",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -b",
+    "fetch:core": "node scripts/fetch-aether.mjs",
+    "test": "node --test scripts/*.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

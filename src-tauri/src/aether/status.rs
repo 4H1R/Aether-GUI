@@ -1,5 +1,6 @@
 use super::profiles::ScanMode;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::time::Duration;
 
 pub const DEFAULT_SOCKS_ADDR: &str = "127.0.0.1:1819";
@@ -11,7 +12,12 @@ pub fn parse_bind_address(addr: &str) -> SocketAddr {
 /// When Aether listens on 0.0.0.0, we probe 127.0.0.1 instead.
 fn probe_addr(listen: &SocketAddr) -> SocketAddr {
     if listen.ip().is_unspecified() {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen.port())
+        let ip = if listen.is_ipv6() {
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        } else {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        };
+        SocketAddr::new(ip, listen.port())
     } else {
         *listen
     }
@@ -20,6 +26,23 @@ fn probe_addr(listen: &SocketAddr) -> SocketAddr {
 /// Ground-truth "are we connected" signal: TCP connect to SOCKS5 port.
 pub fn port_is_live(addr: &SocketAddr) -> bool {
     TcpStream::connect_timeout(&probe_addr(addr), Duration::from_millis(300)).is_ok()
+}
+
+/// A TCP listener alone may be Aether's initial bind check or another app.
+/// Require a real SOCKS5 no-auth negotiation before reporting Connected.
+pub fn socks_is_ready(addr: &SocketAddr) -> bool {
+    let timeout = Duration::from_millis(300);
+    let Ok(mut stream) = TcpStream::connect_timeout(&probe_addr(addr), timeout) else {
+        return false;
+    };
+    if stream.set_read_timeout(Some(timeout)).is_err()
+        || stream.set_write_timeout(Some(timeout)).is_err() {
+        return false;
+    }
+    let mut response = [0u8; 2];
+    stream.write_all(&[5, 1, 0]).is_ok()
+        && stream.read_exact(&mut response).is_ok()
+        && response == [5, 0]
 }
 
 /// The GUI's connect timeout must exceed Aether's own per-mode scan deadline
@@ -84,6 +107,29 @@ mod tests {
         assert_eq!(probe_addr(&any), "127.0.0.1:1919".parse().unwrap());
         let loopback: SocketAddr = "127.0.0.1:1919".parse().unwrap();
         assert_eq!(probe_addr(&loopback), loopback);
+    }
+
+    #[test]
+    fn ipv6_wildcard_probes_ipv6_loopback() {
+        let any: SocketAddr = "[::]:1819".parse().unwrap();
+        assert_eq!(probe_addr(&any), "[::1]:1819".parse().unwrap());
+    }
+
+    #[test]
+    fn readiness_requires_a_socks5_handshake() {
+        for (reply, expected) in [([5, 0], true), ([5, 255], false), ([72, 84], false)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut greeting = [0; 3];
+                stream.read_exact(&mut greeting).unwrap();
+                assert_eq!(greeting, [5, 1, 0]);
+                stream.write_all(&reply).unwrap();
+            });
+            assert_eq!(socks_is_ready(&addr), expected);
+            server.join().unwrap();
+        }
     }
 
     #[test]

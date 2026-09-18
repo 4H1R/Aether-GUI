@@ -57,7 +57,11 @@ fn resolve_binary(app: &AppHandle) -> Result<PathBuf, AetherError> {
     } else {
         "aether"
     };
-    let path = dir.join("binaries").join(name);
+    let path = if cfg!(debug_assertions) {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries/core").join(name)
+    } else {
+        dir.join("binaries").join(name)
+    };
     if !path.exists() {
         return Err(AetherError::BinaryMissing(path.display().to_string()));
     }
@@ -96,6 +100,7 @@ pub fn start_connect(
     // explicitly inside spawn_and_monitor rather than ever leaving the
     // state machine stuck in Launching with no process behind it.
     let profile = profile_override.unwrap_or_else(|| profiles::load(&app));
+    profile.validate().map_err(AetherError::InvalidProfile)?;
     let binary = resolve_binary(&app)?;
     let data_dir = app_data_dir(&app);
     std::fs::create_dir_all(&data_dir).map_err(|e| AetherError::Internal(e.to_string()))?;
@@ -116,6 +121,12 @@ pub fn start_connect(
         let socks = status::parse_bind_address(&profile.bind_address);
         if status::port_is_live(&socks) {
             return Err(AetherError::PortInUse(socks.port()));
+        }
+        if !profile.http_proxy.trim().is_empty() {
+            let http = status::parse_bind_address(profile.http_proxy.trim());
+            if status::port_is_live(&http) {
+                return Err(AetherError::PortInUse(http.port()));
+            }
         }
         mgr.state = ConnectionState::Launching;
         // A fresh user-initiated connect always gets a full retry budget,
@@ -164,7 +175,9 @@ fn spawn_and_monitor(
         let mut mgr = manager.lock().unwrap();
         mgr.session = Some(session);
         mgr.user_requested_stop = false;
+        mgr.state = ConnectionState::Connecting;
     }
+    let _ = app.emit(STATUS_EVENT, &ConnectionState::Connecting);
 
     // Forward every log line to the frontend's advanced/log panel as it
     // arrives, independent of whether status classification succeeds.
@@ -267,7 +280,6 @@ fn monitor_connect(
 ) {
     let deadline = Instant::now() + status::connect_timeout(&profile.scan_mode);
     let socks = status::parse_bind_address(&profile.bind_address);
-    let mut announced_connecting = false;
 
     loop {
         std::thread::sleep(Duration::from_millis(400));
@@ -291,23 +303,7 @@ fn monitor_connect(
             return;
         }
 
-        if !announced_connecting {
-            let done = mgr
-                .session
-                .as_ref()
-                .map(|s| s.prompts_done())
-                .unwrap_or(false);
-            if done {
-                mgr.state = ConnectionState::Connecting;
-                let new_state = mgr.state.clone();
-                drop(mgr);
-                let _ = app.emit(STATUS_EVENT, &new_state);
-                announced_connecting = true;
-                continue;
-            }
-        }
-
-        if status::port_is_live(&socks) {
+        if status::socks_is_ready(&socks) {
             let new_state = ConnectionState::Connected {
                 socks_addr: profile.bind_address.clone(),
                 connected_at_ms: now_millis(),

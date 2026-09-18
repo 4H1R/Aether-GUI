@@ -31,6 +31,9 @@ interface ConnectionState {
   setIpVersion: (ip_version: ConnectionProfile["ip_version"]) => void;
   setQuickReconnect: (quick_reconnect: boolean) => void;
   setMasqueHttp2: (masque_http2: boolean) => void;
+  setTlsFragment: (tls_fragment: boolean) => void;
+  setHttpProxy: (http_proxy: string) => void;
+  setUpstreamProxy: (upstream_proxy: string) => void;
   setMasqueNoize: (masque_noize: MasqueNoize) => void;
   setWgNoize: (wg_noize: WgNoize) => void;
   setBindAddress: (bind_address: string) => void;
@@ -56,6 +59,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     ip_version: "v4",
     quick_reconnect: true,
     masque_http2: false,
+    tls_fragment: false,
+    http_proxy: "",
+    upstream_proxy: "",
     masque_noize: "firewall",
     wg_noize: "balanced",
     bind_address: "127.0.0.1:1819",
@@ -119,6 +125,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   setMasqueHttp2: (masque_http2) =>
     set((s) => ({ profile: { ...s.profile, masque_http2 } })),
+
+  setTlsFragment: (tls_fragment) =>
+    set((s) => ({ profile: { ...s.profile, tls_fragment } })),
+  setHttpProxy: (http_proxy) =>
+    set((s) => ({ profile: { ...s.profile, http_proxy } })),
+  setUpstreamProxy: (upstream_proxy) =>
+    set((s) => ({ profile: { ...s.profile, upstream_proxy } })),
 
   setMasqueNoize: (masque_noize) =>
     set((s) => ({ profile: { ...s.profile, masque_noize } })),

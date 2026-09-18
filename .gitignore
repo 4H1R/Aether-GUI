@@ -1,4 +1,10 @@
 node_modules/
+.local/
+src-tauri/binaries/core/
+src-tauri/binaries/.fetch-*/
+/aether*.toml
+src-tauri/binaries/pt/
+src-tauri/binaries/run-aether.bat
 dist/
 dist-ssr/
 *.local

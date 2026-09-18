@@ -10,7 +10,7 @@ export type ConnectionStatus =
   | { state: "Disconnecting" }
   | { state: "Error"; message: string; phase: string };
 
-export type Protocol = "auto" | "masque" | "wireguard" | "gool";
+export type Protocol = "auto" | "masque" | "wireguard" | "gool" | "mim";
 export type ScanMode = "turbo" | "balanced" | "thorough" | "stealth" | "ironclad";
 export type IpVersion = "v4" | "v6" | "both";
 export type MasqueNoize = "firewall" | "gfw" | "off";
@@ -27,6 +27,10 @@ export interface ConnectionProfile {
   /** Aether ≥1.2.0: run MASQUE over HTTP/2 (TCP) instead of the default
    * HTTP/3 (QUIC) — for networks that block or throttle UDP. */
   masque_http2: boolean;
+  tls_fragment: boolean;
+  http_proxy: string;
+  /** May contain credentials; kept in memory only. */
+  upstream_proxy: string;
   /** Obfuscation profile for MASQUE (firewall/gfw/off). */
   masque_noize: MasqueNoize;
   /** Obfuscation profile for WireGuard/gool (balanced/aggressive/light/off). */

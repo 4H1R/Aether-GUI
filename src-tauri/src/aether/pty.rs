@@ -6,14 +6,12 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 pub struct PtySession {
     child: Box<dyn Child + Send + Sync>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    prompts_done: Arc<AtomicBool>,
     // Keeps the pty master (and thus the slave/child's controlling tty) alive
     // for the life of the session; never read from directly after spawn.
     _master: Box<dyn MasterPty + Send>,
@@ -22,10 +20,6 @@ pub struct PtySession {
 impl PtySession {
     pub fn pid(&self) -> u32 {
         self.child.process_id().unwrap_or(0)
-    }
-
-    pub fn prompts_done(&self) -> bool {
-        self.prompts_done.load(Ordering::Relaxed)
     }
 
     pub fn try_wait(&mut self) -> Option<portable_pty::ExitStatus> {
@@ -95,25 +89,29 @@ pub fn spawn(
 
     let mut cmd = CommandBuilder::new(binary);
     cmd.cwd(cwd);
+    // The GUI owns its launch settings. Inherited CLI settings can otherwise
+    // move the listener, force Tor, or silently reuse a different team's token.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().to_ascii_uppercase().starts_with("AETHER_") {
+            cmd.env_remove(key);
+        }
+    }
     // Aether ≥1.1.1 takes the whole profile as flags, so the interactive
     // prompts below normally never appear — read_loop's prompt answering is
     // kept as a fallback for output-format drift.
     for arg in profile.as_args() {
         cmd.arg(arg);
     }
-    // Env var, not a flag (see ConnectionProfile::masque_http2's doc-comment):
-    // any value suppresses Aether 1.2.0's interactive "MASQUE transport"
-    // prompt, and only a truthy one selects HTTP/2.
-    cmd.env(
-        "AETHER_MASQUE_HTTP2",
-        if profile.masque_http2 { "1" } else { "0" },
-    );
+    if !profile.upstream_proxy.trim().is_empty() {
+        cmd.env("AETHER_UPSTREAM", profile.upstream_proxy.trim());
+    }
     // Keep Access credentials out of the process command line. Aether's
     // flags and environment variables are equivalent, but command arguments
     // are trivially visible to other local processes on several platforms.
     match profile.zero_trust_auth {
         ZeroTrustAuth::Service
-            if !profile.access_client_id.trim().is_empty()
+            if !profile.zero_trust_team.trim().is_empty()
+                && !profile.access_client_id.trim().is_empty()
                 && !profile.access_client_secret.trim().is_empty() =>
         {
             cmd.env("AETHER_ACCESS_CLIENT_ID", profile.access_client_id.trim());
@@ -152,23 +150,18 @@ pub fn spawn(
     let writer = Arc::new(Mutex::new(raw_writer));
     let writer_for_thread = Arc::clone(&writer);
 
-    let prompts_done = Arc::new(AtomicBool::new(false));
-    let prompts_done_for_thread = Arc::clone(&prompts_done);
-
     std::thread::spawn(move || {
         read_loop(
             reader.as_mut(),
             writer_for_thread,
             profile,
             log_tx,
-            prompts_done_for_thread,
         );
     });
 
     Ok(PtySession {
         child,
         writer,
-        prompts_done,
         _master: pair.master,
     })
 }
@@ -178,7 +171,6 @@ fn read_loop(
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     profile: ConnectionProfile,
     log_tx: Sender<LogEvent>,
-    prompts_done: Arc<AtomicBool>,
 ) {
     let mut answered: HashSet<&'static str> = HashSet::new();
     let mut current_section: Option<&'static str> = None;
@@ -253,9 +245,6 @@ fn read_loop(
                             timestamp: now_millis(),
                         });
                         answered.insert(section);
-                        if answered.len() == PROMPT_TABLE.len() {
-                            prompts_done.store(true, Ordering::Relaxed);
-                        }
                     }
                 }
             }

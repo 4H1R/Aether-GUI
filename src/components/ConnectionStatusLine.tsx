@@ -106,7 +106,7 @@ export function ConnectionStatusLine() {
       break;
     case "Launching":
       primary = "Starting Aether…";
-      secondary = "Answering setup prompts";
+      secondary = "Starting the tunnel engine";
       break;
     case "Connecting":
       primary = "Finding a route…";
@@ -121,7 +121,7 @@ export function ConnectionStatusLine() {
       break;
     case "Connected":
       primary = "Connected";
-      secondary = elapsed;
+      secondary = `${status.socks_addr} · ${elapsed}`;
       break;
     case "Disconnecting":
       primary = "Disconnecting…";
@@ -151,7 +151,7 @@ export function ConnectionStatusLine() {
       <AnimatePresence mode="wait">
         <motion.span
           key={status.state}
-          className="block min-h-5 max-w-xs truncate font-mono text-xs text-muted-foreground"
+          className="block min-h-5 max-w-xs break-words font-mono text-xs text-muted-foreground"
           {...TEXT_TRANSITION}
         >
           {secondary}

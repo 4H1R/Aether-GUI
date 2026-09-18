@@ -11,6 +11,7 @@ pub enum Protocol {
     Masque,
     Wireguard,
     Gool,
+    Mim,
 }
 
 impl Protocol {
@@ -20,6 +21,7 @@ impl Protocol {
             Protocol::Auto | Protocol::Masque => "1",
             Protocol::Wireguard => "2",
             Protocol::Gool => "3",
+            Protocol::Mim => "4",
         }
     }
 }
@@ -122,6 +124,15 @@ pub struct ConnectionProfile {
     /// new interactive "MASQUE transport" prompt in both directions.
     #[serde(default)]
     pub masque_http2: bool,
+    /// Fragment the TLS ClientHello on the HTTP/2 carrier.
+    #[serde(default)]
+    pub tls_fragment: bool,
+    /// Optional local HTTP CONNECT listener, in addition to SOCKS5.
+    #[serde(default)]
+    pub http_proxy: String,
+    /// Optional upstream proxy. May contain credentials; never persisted.
+    #[serde(default)]
+    pub upstream_proxy: String,
     /// Obfuscation profile for MASQUE (firewall/gfw/off). Passed as
     /// `--noize <value>`. Only sent when the active protocol is MASQUE-based.
     #[serde(default = "default_masque_noize")]
@@ -209,10 +220,16 @@ impl ConnectionProfile {
     pub fn as_args(&self) -> Vec<String> {
         let mut args = Vec::with_capacity(20);
         match self.protocol {
-            Protocol::Auto => {}
-            Protocol::Masque => args.push("--masque".into()),
+            Protocol::Auto | Protocol::Masque => args.push("--masque".into()),
             Protocol::Wireguard => args.push("--wg".into()),
             Protocol::Gool => args.push("--gool".into()),
+            Protocol::Mim => args.push("--mim".into()),
+        }
+        if self.is_masque() {
+            args.push(if self.masque_http2 { "--h2" } else { "--h3" }.into());
+            if self.masque_http2 && self.tls_fragment {
+                args.push("--fragment".into());
+            }
         }
         args.push(match self.scan_mode {
             ScanMode::Turbo => "--turbo".into(),
@@ -235,17 +252,17 @@ impl ConnectionProfile {
         args.push("--noize".into());
         args.push(
             match self.protocol {
-                Protocol::Auto | Protocol::Masque => self.masque_noize.as_flag(),
+                Protocol::Auto | Protocol::Masque | Protocol::Mim => self.masque_noize.as_flag(),
                 Protocol::Wireguard | Protocol::Gool => self.wg_noize.as_flag(),
             }
             .into(),
         );
-        // Only forward --bind when non-default and parseable.
-        if self.bind_address != default_bind_address()
-            && self.bind_address.parse::<std::net::SocketAddr>().is_ok()
-        {
-            args.push("--bind".into());
-            args.push(self.bind_address.clone());
+        // Always pin the listener, so inherited AETHER_SOCKS cannot move it.
+        args.push("--bind".into());
+        args.push(self.bind_address.trim().into());
+        if !self.http_proxy.trim().is_empty() {
+            args.push("--http-proxy".into());
+            args.push(self.http_proxy.trim().into());
         }
         if !self.dns.trim().is_empty() {
             args.push("--dns".into());
@@ -271,6 +288,30 @@ impl ConnectionProfile {
             args.push(self.routes_file.trim().into());
         }
         args
+    }
+
+    pub fn is_masque(&self) -> bool {
+        matches!(self.protocol, Protocol::Auto | Protocol::Masque | Protocol::Mim)
+    }
+
+    /// Reject bad settings before provisioning an identity or spawning a core.
+    pub fn validate(&self) -> Result<(), String> {
+        let socks = self.bind_address.trim().parse::<std::net::SocketAddr>()
+            .map_err(|_| "SOCKS5 address must be an IP address and port".to_string())?;
+        if socks.port() == 0 { return Err("SOCKS5 port must be between 1 and 65535".into()); }
+        if !self.http_proxy.trim().is_empty() {
+            let http = self.http_proxy.trim().parse::<std::net::SocketAddr>()
+                .map_err(|_| "HTTP proxy address must be an IP address and port".to_string())?;
+            if http.port() == 0 { return Err("HTTP proxy port must be between 1 and 65535".into()); }
+            if http.port() == socks.port() {
+                return Err("HTTP and SOCKS5 proxies must use different ports".into());
+            }
+        }
+        let upstream = self.upstream_proxy.trim();
+        if !upstream.is_empty() && !(upstream.starts_with("socks5://") || upstream.starts_with("http://")) {
+            return Err("Upstream proxy must start with socks5:// or http://".into());
+        }
+        Ok(())
     }
 
     /// The core accepts Zero Trust credentials as flags too, but putting a
@@ -307,10 +348,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_omits_bind_flag() {
+    fn default_explicitly_selects_protocol_transport_and_bind() {
         let p = ConnectionProfile::default();
         let args = p.as_args();
-        assert!(!args.iter().any(|a| a == "--bind"), "args={args:?}");
+        assert_eq!(&args[..2], ["--masque", "--h3"]);
+        assert!(args.windows(2).any(|a| a == ["--bind", "127.0.0.1:1819"]));
     }
 
     #[test]
@@ -350,11 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_bind_is_not_forwarded() {
+    fn invalid_bind_is_rejected_before_launch() {
         let mut p = ConnectionProfile::default();
         p.bind_address = "127.0.0.1:".into();
-        let args = p.as_args();
-        assert!(!args.iter().any(|a| a == "--bind"), "args={args:?}");
+        assert!(p.validate().is_err());
     }
 
     #[test]
@@ -390,11 +431,15 @@ mod tests {
         assert_eq!(
             p.as_args(),
             vec![
+                "--masque",
+                "--h3",
                 "--balanced",
                 "-4",
                 "--quick-reconnect",
                 "--noize",
                 "firewall",
+                "--bind",
+                "127.0.0.1:1819",
                 "--dns",
                 "9.9.9.9,1.1.1.1",
                 "--team",
@@ -423,6 +468,29 @@ mod tests {
         );
         assert!(!p.as_args().iter().any(|arg| arg.contains("me@example.com")));
     }
+
+    #[test]
+    fn nested_masque_uses_masque_obfuscation_and_h2_fragmentation() {
+        let p = ConnectionProfile { protocol: Protocol::Mim, masque_http2: true, tls_fragment: true, ..Default::default() };
+        let args = p.as_args();
+        assert_eq!(&args[..3], ["--mim", "--h2", "--fragment"]);
+        assert!(args.windows(2).any(|a| a == ["--noize", "firewall"]));
+    }
+
+    #[test]
+    fn wireguard_does_not_receive_masque_flags() {
+        let p = ConnectionProfile { protocol: Protocol::Wireguard, masque_http2: true, tls_fragment: true, ..Default::default() };
+        assert!(!p.as_args().iter().any(|a| a == "--h2" || a == "--fragment"));
+    }
+
+    #[test]
+    fn proxy_conflicts_are_rejected_and_upstream_credentials_are_not_arguments() {
+        let mut p = ConnectionProfile { http_proxy: "127.0.0.1:1819".into(), upstream_proxy: "http://user:secret@localhost:1080".into(), ..Default::default() };
+        assert!(p.validate().is_err());
+        p.http_proxy = "127.0.0.1:1820".into();
+        assert!(p.validate().is_ok());
+        assert!(!p.as_args().iter().any(|a| a.contains("secret")));
+    }
 }
 
 impl Default for ConnectionProfile {
@@ -434,6 +502,9 @@ impl Default for ConnectionProfile {
             ip_version: IpVersion::V4,
             quick_reconnect: true,
             masque_http2: false,
+            tls_fragment: false,
+            http_proxy: String::new(),
+            upstream_proxy: String::new(),
             masque_noize: MasqueNoize::Firewall,
             wg_noize: WgNoize::Balanced,
             bind_address: default_bind_address(),
@@ -480,6 +551,7 @@ pub fn save(app: &tauri::AppHandle, profile: &ConnectionProfile) {
         persisted.access_client_id.clear();
         persisted.access_client_secret.clear();
         persisted.access_token.clear();
+        persisted.upstream_proxy.clear();
         if let Ok(value) = serde_json::to_value(persisted) {
             store.set(STORE_KEY, value);
             let _ = store.save();
