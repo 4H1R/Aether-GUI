@@ -22,4 +22,4 @@ The GUI exposes WARP-based transports. Tor's support files are included with the
 
 ## Verification
 
-The default MASQUE HTTP/3 core was tested with a real HTTPS request through SOCKS5 and returned `warp=on`. HTTP/2 did not find a usable gateway on the test network; availability depends on the network and upstream endpoints. See the release's linked build for platform build/test results.
+The default MASQUE HTTP/3 core was tested with a real HTTPS request through SOCKS5 and returned `warp=on`. HTTP/2 did not find a usable gateway and MASQUE-in-MASQUE could not establish its inner hop on the test network; availability depends on the network and upstream endpoints. See the release's linked build for platform build/test results.
